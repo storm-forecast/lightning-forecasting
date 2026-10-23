@@ -1,0 +1,38 @@
+{
+  "Nordeste_Brasileiro_buffered": [
+    -54.3983,
+    -20.8419,
+    -34.1017,
+    0.3983
+  ],
+  "Sudeste_Brasileiro_Uruguai_Oeste_Argentino_buffered": [
+    -69.3983,
+    -39.6947,
+    -47.6017,
+    -12.8758
+  ],
+  "Bacia_do_Prata_buffered": [
+    -62.8983,
+    -33.7502,
+    -51.3517,
+    -20.9132
+  ],
+  "Minas_Gerais_Sudeste_Brasileiro_buffered": [
+    -62.3983,
+    -25.3148,
+    -39.6017,
+    -3.8542
+  ],
+  "Regiao_Equatorial_buffered": [
+    -74.3983,
+    -5.8942,
+    -48.8517,
+    11.8805
+  ],
+  "Colombia_Maracaibo_buffered": [
+    -78.1483,
+    5.3563,
+    -70.6017,
+    11.8805
+  ]
+}

@@ -1,0 +1,26 @@
+__pycache__/
+*.py[cod]
+.env
+data/
+.venv/
+venv/
+.DS_Store
+
+# Generated products
+*.nc
+*.grib2
+*.idx
+
+# Trained models never go in Git: GitHub caps files at 100 MB and the
+# classifiers run from 40 MB to 1.2 GB. The API fetches them from Drive
+# on first boot - see app/core/drive.py.
+*.h5
+*.keras
+*.npy
+Model-Trained/
+Model-Trained-new/
+assets/
+
+# Local build variants used while debugging
+Dockerfile.219
+req219.txt

@@ -1,0 +1,52 @@
+{
+  "_warning": "ILLUSTRATIVE VALUES. Do not use them as they are: generate the real ones with scripts/extract_region_bounds.py from the shapefiles, otherwise each region is subset incorrectly.",
+  "_format": "[minLon, minLat, maxLon, maxLat]",
+  "Nordeste_Brasileiro_buffered": [
+    -46.0,
+    -18.0,
+    -34.0,
+    -2.0
+  ],
+  "Sudeste_Brasileiro_Uruguai_Oeste_Argentino_buffered": [
+    -60.0,
+    -35.0,
+    -44.0,
+    -19.0
+  ],
+  "Amazonia_norte_buffered": [
+    -70.0,
+    -5.0,
+    -50.0,
+    5.0
+  ],
+  "Amazonia_sul_buffered": [
+    -70.0,
+    -14.0,
+    -52.0,
+    -2.0
+  ],
+  "Bacia_do_Prata_buffered": [
+    -64.0,
+    -36.0,
+    -50.0,
+    -20.0
+  ],
+  "Minas_Gerais_Sudeste_Brasileiro_buffered": [
+    -52.0,
+    -24.0,
+    -39.0,
+    -14.0
+  ],
+  "Regiao_Equatorial_buffered": [
+    -62.0,
+    -4.0,
+    -44.0,
+    6.0
+  ],
+  "Colombia_Maracaibo_buffered": [
+    -78.0,
+    0.0,
+    -68.0,
+    12.0
+  ]
+}
