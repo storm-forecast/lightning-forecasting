@@ -79,9 +79,25 @@ jobs:
 
       - if: steps.config.outputs.ok == 'true' && steps.cache-modelos.outputs.cache-hit != 'true'
         name: Baixar os modelos do Drive
+        env:
+          ID_OU_LINK: ${{ secrets.GDRIVE_ASSETS_ZIP_ID }}
         run: |
           mkdir -p "${{ runner.temp }}/assets"
-          gdown --id "${{ secrets.GDRIVE_ASSETS_ZIP_ID }}" -O "${{ runner.temp }}/modelos.zip"
+          # The secret holds the file id, but a share link pasted whole is the natural mistake and
+          # costs nothing to accept. --fuzzy pulls the id out of a url; --id is deprecated in gdown 5.
+          case "$ID_OU_LINK" in
+            *drive.google.com*) URL="$ID_OU_LINK" ;;
+            *)                  URL="https://drive.google.com/uc?id=$ID_OU_LINK" ;;
+          esac
+          gdown --fuzzy "$URL" -O "${{ runner.temp }}/modelos.zip"
+          # A restricted file comes back as Google's sign-in page, which unzip would reject with a
+          # message about the central directory -- unhelpful. Say the real cause instead.
+          if ! unzip -tq "${{ runner.temp }}/modelos.zip" >/dev/null 2>&1; then
+            echo "::error::O que o Drive devolveu não é um zip. O arquivo provavelmente não está" \
+                 "compartilhado como 'Qualquer pessoa com o link'."
+            head -c 200 "${{ runner.temp }}/modelos.zip"
+            exit 1
+          fi
           unzip -q "${{ runner.temp }}/modelos.zip" -d "${{ runner.temp }}/assets"
           rm "${{ runner.temp }}/modelos.zip"
           du -sh "${{ runner.temp }}/assets"
