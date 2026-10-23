@@ -1,38 +1,38 @@
 # Render blueprint.
 #
-# One Web Service: the API serves the files and its internal scheduler runs
-# the forecast every day. Render Cron Jobs cannot mount a persistent disk,
-# which is why the daily run lives inside the web service.
+# This service only SERVES: status, manifests, and the files of whatever runs are on disk. It does not
+# compute the forecast any more -- that moved to .github/workflows/forecast.yml, which runs on a GitHub
+# runner and publishes to R2.
 #
-# Plan: the pipeline loads ConvLSTM models into memory, one region at a time.
-# Use 'standard' (2 GB) or higher; 'starter' (512 MB) is not enough.
+# Why it moved: the pipeline loads TensorFlow plus the ConvLSTM models. TensorFlow alone takes 425 MB
+# just to import (measured), against the 512 MB of a free instance, and a free instance has no
+# persistent disk and spins down when idle, so a finished run would not survive to be served. A plan
+# that fits is a second subscription for something that runs once a day. A GitHub runner has 7 GB of
+# RAM, real cron, and costs nothing on this schedule.
+#
+# So: free plan, no disk, scheduler off. The map reads the forecast from the bucket, not from here.
 
 services:
   - type: web
     name: lightning-prediction-api
     runtime: docker
     dockerfilePath: ./Dockerfile
-    plan: standard
+    plan: free
     region: oregon
     healthCheckPath: /api/v1/health
     autoDeploy: true
 
-    disk:
-      name: lightning-data
-      mountPath: /var/data
-      sizeGB: 10
-
     envVars:
+      # Ephemeral on the free plan, which is fine: nothing here is computed or kept.
       - key: DATA_DIR
         value: /var/data
 
-      # UTC time of the daily run (the 00z GFS completes around 05:30 UTC).
-      - key: RUN_AT_UTC
-        value: "07:30"
+      # The run lives in GitHub Actions now. Left on, these would try the pipeline at every restart
+      # and fail for want of memory and models, filling the log with a failure nobody should act on.
       - key: ENABLE_SCHEDULER
-        value: "true"
+        value: "false"
       - key: RUN_ON_STARTUP
-        value: "true"
+        value: "false"
 
       - key: HORIZON_HOURS
         value: "48"
