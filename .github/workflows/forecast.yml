@@ -1,12 +1,15 @@
-# Daily: run the forecast and publish it to Cloudflare R2, where the map reads it (URL_PREVISAO).
+# Daily: run the forecast and publish it as a release on lightning-data-prediction, where the map
+# reads it (URL_PREVISAO).
 #
 # Why here and not on the web service: the pipeline needs TensorFlow plus the ConvLSTM models, which
 # does not fit the 512 MB of a free Render instance -- and a paid one is a second subscription for
 # something that runs once a day for a few dozen minutes. A GitHub runner has 7 GB of RAM and 14 GB of
-# disk, costs nothing on this schedule, and a bucket serves the result without a service of its own.
+# disk, costs nothing on this schedule. The result goes to a release asset rather than object storage
+# because that needs no payment card and no new account, and GitHub serves release assets with
+# Last-Modified and ETag -- which is all the consumer checks before deciding to download.
 #
 # 07:30 UTC: the 00z GFS finishes arriving around 05:30 UTC.
-name: Previsão → R2
+name: Previsão → release
 
 on:
   schedule:
@@ -22,7 +25,7 @@ on:
         default: false
 
 concurrency:
-  group: previsao-r2
+  group: previsao-release
   cancel-in-progress: false
 
 jobs:
@@ -34,11 +37,11 @@ jobs:
       - name: Conferir configuração
         id: config
         env:
-          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
           GDRIVE_ASSETS_ZIP_ID: ${{ secrets.GDRIVE_ASSETS_ZIP_ID }}
         run: |
           faltam=""
-          [ -z "$R2_BUCKET" ] && faltam="$faltam R2_BUCKET"
+          [ -z "$DATA_REPO_TOKEN" ] && faltam="$faltam DATA_REPO_TOKEN"
           [ -z "$GDRIVE_ASSETS_ZIP_ID" ] && faltam="$faltam GDRIVE_ASSETS_ZIP_ID"
           if [ -n "$faltam" ]; then
             echo "::notice::Faltam segredos:$faltam — nada publicado."
@@ -117,11 +120,35 @@ jobs:
             ${{ inputs.force && '--force' || '' }}
 
       - if: steps.config.outputs.ok == 'true'
-        name: Publicar no R2
+        name: Publicar a previsão
         env:
           DATA_DIR: ${{ runner.temp }}/data
-          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_BUCKET: ${{ secrets.R2_BUCKET }}
-        run: python -m jobs.publish_to_r2
+          GH_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
+          REPO: storm-forecast/lightning-data-prediction
+          TAG: latest
+        run: |
+          set -e
+          ARQ=$(find "${{ runner.temp }}/data/products" -name "gfs_prediction_ALL_regions_suavisado.nc" | sort | tail -1)
+          if [ -z "$ARQ" ]; then
+            echo "::error::A rodada não deixou o arquivo suavizado."
+            exit 1
+          fi
+          echo "publicando $ARQ ($(du -h "$ARQ" | cut -f1))"
+
+          # One tag, overwritten: the consumer is configured with a single URL and has no way to learn
+          # a new run id each day. --clobber replaces the asset, which gives it a fresh Last-Modified
+          # and ETag -- the two headers the consumer polls on.
+          gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1 \
+            || gh release create "$TAG" --repo "$REPO" \
+                 --title "Previsão mais recente" \
+                 --notes "Sobrescrito a cada rodada. Veja o README para o que há dentro."
+          gh release upload "$TAG" "$ARQ" --repo "$REPO" --clobber
+
+          # A dated copy as well, so there is a record to measure against later: today's forecast is
+          # the only thing that can be checked tomorrow, and overwriting it leaves nothing to check.
+          DATA=$(date -u +%Y-%m-%d)
+          gh release view "$DATA" --repo "$REPO" >/dev/null 2>&1 \
+            || gh release create "$DATA" --repo "$REPO" --title "Previsão de $DATA" --notes "Arquivo."
+          gh release upload "$DATA" "$ARQ" --repo "$REPO" --clobber
+
+          echo "https://github.com/$REPO/releases/download/$TAG/$(basename "$ARQ")"
