@@ -1,0 +1,111 @@
+# Daily: run the forecast and publish it to Cloudflare R2, where the map reads it (URL_PREVISAO).
+#
+# Why here and not on the web service: the pipeline needs TensorFlow plus the ConvLSTM models, which
+# does not fit the 512 MB of a free Render instance -- and a paid one is a second subscription for
+# something that runs once a day for a few dozen minutes. A GitHub runner has 7 GB of RAM and 14 GB of
+# disk, costs nothing on this schedule, and a bucket serves the result without a service of its own.
+#
+# 07:30 UTC: the 00z GFS finishes arriving around 05:30 UTC.
+name: Previsão → R2
+
+on:
+  schedule:
+    - cron: "30 7 * * *"
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Data de referência (YYYY-MM-DD). Vazio = hoje em UTC."
+        required: false
+      force:
+        description: "Reprocessar mesmo se a rodada já existir"
+        type: boolean
+        default: false
+
+concurrency:
+  group: previsao-r2
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      # Until the secrets are set, say so and stop instead of failing every morning.
+      - name: Conferir configuração
+        id: config
+        env:
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          GDRIVE_ASSETS_ZIP_ID: ${{ secrets.GDRIVE_ASSETS_ZIP_ID }}
+        run: |
+          faltam=""
+          [ -z "$R2_BUCKET" ] && faltam="$faltam R2_BUCKET"
+          [ -z "$GDRIVE_ASSETS_ZIP_ID" ] && faltam="$faltam GDRIVE_ASSETS_ZIP_ID"
+          if [ -n "$faltam" ]; then
+            echo "::notice::Faltam segredos:$faltam — nada publicado."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.config.outputs.ok == 'true'
+        uses: actions/checkout@v4
+
+      # 3.12 is required, not incidental: the regressors carry a Lambda layer whose function Keras
+      # saved as marshalled CPython bytecode from Colab, and that format does not survive a minor
+      # version change -- see the Dockerfile for what breaks.
+      - if: steps.config.outputs.ok == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - if: steps.config.outputs.ok == 'true'
+        name: libeccodes (pygrib lê GRIB2 com ela)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libeccodes0 libeccodes-dev
+
+      - if: steps.config.outputs.ok == 'true'
+        run: pip install -r requirements.txt gdown
+
+      # The models are 3.1 GB and do not change between runs, so they are cached. The cache limit is
+      # 10 GB per repository; this fits with room to spare only because the models were re-saved
+      # without the optimizer state, which took them from 9.3 GB.
+      - if: steps.config.outputs.ok == 'true'
+        id: cache-modelos
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/assets
+          key: modelos-${{ secrets.GDRIVE_ASSETS_ZIP_ID }}
+
+      - if: steps.config.outputs.ok == 'true' && steps.cache-modelos.outputs.cache-hit != 'true'
+        name: Baixar os modelos do Drive
+        run: |
+          mkdir -p "${{ runner.temp }}/assets"
+          gdown --id "${{ secrets.GDRIVE_ASSETS_ZIP_ID }}" -O "${{ runner.temp }}/modelos.zip"
+          unzip -q "${{ runner.temp }}/modelos.zip" -d "${{ runner.temp }}/assets"
+          rm "${{ runner.temp }}/modelos.zip"
+          du -sh "${{ runner.temp }}/assets"
+
+      - if: steps.config.outputs.ok == 'true'
+        name: Rodar a previsão
+        env:
+          DATA_DIR: ${{ runner.temp }}/data
+          ASSETS_LOCAL_DIR: ${{ runner.temp }}/assets
+          HORIZON_HOURS: "48"
+          PROB_THRESHOLD: "0.15"
+          KEEP_RUNS: "1"           # the runner is thrown away; only this run matters
+          ENABLE_SCHEDULER: "false"
+        run: |
+          python -m worker.run_daily \
+            ${{ inputs.date && format('--date {0}', inputs.date) || '' }} \
+            ${{ inputs.force && '--force' || '' }}
+
+      - if: steps.config.outputs.ok == 'true'
+        name: Publicar no R2
+        env:
+          DATA_DIR: ${{ runner.temp }}/data
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: python -m jobs.publish_to_r2
