@@ -71,6 +71,19 @@ class Settings(BaseSettings):
     lat_min: float = -50.0
     lat_max: float = 15.0
 
+    # A second, precipitation-only pass over the whole globe.
+    #
+    # It is a separate pass and not a wider `lon_min/lat_min` on purpose: the lightning models are
+    # trained per region of South America and cannot be applied elsewhere, while the parameters feeding
+    # them would be computed over the whole downloaded domain -- eighteen times the points, for fifteen
+    # fields, to then be thrown away outside the regions. Precipitation needs one field and no model,
+    # so asking for it separately is cheap where asking for everything is not.
+    precip_global: bool = False
+    precip_global_lon_min: float = -180.0
+    precip_global_lon_max: float = 180.0
+    precip_global_lat_min: float = -60.0   # below this is Antarctica, where GFS precipitation says little
+    precip_global_lat_max: float = 75.0
+
     # Delete the raw GRIB files once converted to NetCDF.
     cleanup_grib: bool = True
     # Delete the run's working directory when finished.

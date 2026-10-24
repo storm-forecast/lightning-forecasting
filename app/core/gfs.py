@@ -85,7 +85,15 @@ class GFSDownloader:
         lat_range: tuple[float, float] = (-50.0, 15.0),
         max_workers: int = 6,
         cleanup_grib: bool = True,
+        only: list[str] | None = None,
     ) -> None:
+
+        # `only` keeps just these variables, by name. The whole point of the byte-range download is to
+        # fetch only what is needed, and precipitation on its own needs one field out of fifteen --
+        # which is what makes a global pass affordable where a global pass of everything would not be.
+        self.variables = ([v for v in VARIABLES if v[0] in only] if only else list(VARIABLES))
+        if not self.variables:
+            raise ValueError(f"No known variable among {only}")
 
         self.output_base = Path(output_base)
         self.lon_range = lon_range
@@ -96,7 +104,7 @@ class GFSDownloader:
         self.leads_past = [6, 12, 18, 24]
         self.leads_today = list(range(6, horizon_hours + 1, 6))
 
-        self.idx_patterns = [v[3] for v in VARIABLES]
+        self.idx_patterns = [v[3] for v in self.variables]
 
         if reference_time is None:
             reference_time = datetime.now(timezone.utc)
@@ -268,7 +276,7 @@ class GFSDownloader:
 
             data: dict[str, np.ndarray] = {}
 
-            for name, short_name, level, _pattern in VARIABLES:
+            for name, short_name, level, _pattern in self.variables:
                 try:
                     if short_name == "tp":
                         # Some lead times carry two accumulations (the last

@@ -52,6 +52,7 @@ MERGED_NAME = "gfs_prediction_ALL_regions_max.nc"
 SMOOTHED_NAME = "gfs_prediction_ALL_regions_suavisado.nc"
 PRECIP_NAME = "gfs_precipitation.nc"
 PRECIP_SMOOTHED_NAME = "gfs_precipitation_suavisado.nc"
+PRECIP_GLOBAL_NAME = "gfs_precipitation_global.nc"
 
 
 class PipelineBusy(RuntimeError):
@@ -417,6 +418,64 @@ def run_pipeline(
                     f"{state.PRECIP_SUBDIR}/{precip_smooth_path.name}"
                 )
                 ds_precip_smooth.close()
+
+            # ---------- 7b. precipitation, worldwide ----------
+            #
+            # Same product, no region. It exists because precipitation comes straight out of GFS and
+            # GFS is global: the South American crop is a choice the lightning models force, not one
+            # the rain needs.
+            #
+            # A separate download rather than a wider one for everything: the models are trained per
+            # region and cannot be applied elsewhere, while the fifteen parameters that feed them would
+            # be computed over eighteen times the points to then be discarded outside those regions.
+            # And it reads the downloaded files straight, skipping compute_parameters_for_files, which
+            # needs the full field set and would fail on a download carrying only `tp`.
+            if cfg.precip_global:
+                run_state.step("Generating the worldwide precipitation")
+                try:
+                    mundo = GFSDownloader(
+                        output_base=cfg.work_dir / "gfs_global",
+                        reference_time=reference_time,
+                        horizon_hours=cfg.horizon_hours,
+                        lon_range=(cfg.precip_global_lon_min, cfg.precip_global_lon_max),
+                        lat_range=(cfg.precip_global_lat_min, cfg.precip_global_lat_max),
+                        max_workers=cfg.gfs_max_workers,
+                        cleanup_grib=True,
+                        only=["tp"],
+                    )
+                    arquivos = mundo.run()
+                    if not arquivos:
+                        raise RuntimeError("the worldwide download produced no file")
+
+                    # The downloader writes the GRIB names, `latitude` and `longitude`; everything
+                    # downstream of compute_parameters_for_files sees `lat` and `lon` because that step
+                    # renames them. This path skips that step, so it renames them here -- without it
+                    # build_precipitation_dataset sorts by a coordinate that does not exist.
+                    partes = []
+                    for f in sorted(arquivos, key=lambda f: f.valid_time):
+                        parte = xr.open_dataset(f.path)[["tp"]]
+                        renomear = {k: v for k, v in (("latitude", "lat"), ("longitude", "lon"))
+                                    if k in parte.coords or k in parte.dims}
+                        partes.append(parte.rename(renomear) if renomear else parte)
+                    ds_mundo = xr.concat(partes, dim="time", coords="minimal", compat="override")
+                    for parte in partes:
+                        parte.close()
+
+                    ds_global = precipitation.build_precipitation_dataset(
+                        ds_mundo, run_date, accum_24h=cfg.precip_accum_24h,
+                    )
+                    global_path = precipitation.save_precipitation(
+                        ds_global, precip_dir / PRECIP_GLOBAL_NAME,
+                    )
+                    files["netcdf_global"] = f"{state.PRECIP_SUBDIR}/{global_path.name}"
+                    log.info("worldwide precipitation: %s (%.1f MB, %s)", global_path.name,
+                             global_path.stat().st_size / 1e6, dict(ds_global.sizes))
+                    ds_global.close()
+                    ds_mundo.close()
+                except Exception as error:                              # noqa: BLE001
+                    # The regional products are the ones that matter; a failure out here must not cost
+                    # them the run they already finished.
+                    log.warning("worldwide precipitation failed, skipped: %s", error)
 
             precip_entry = {
                 "variables": list(ds_precipitation.data_vars),
