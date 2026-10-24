@@ -50,6 +50,38 @@ jobs:
             echo "ok=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # A release needs a commit to hang its tag on: on a repository with no commits at all the API
+      # answers 422 "Repository is empty", and it would answer that after the forecast had already
+      # run for forty minutes. So the first commit is made here, before any of the work.
+      - if: steps.config.outputs.ok == 'true'
+        name: Conferir o repositório de dados
+        env:
+          GH_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
+          REPO: storm-forecast/lightning-data-prediction
+        run: |
+          set -e
+          if ! gh api "repos/$REPO" >/dev/null 2>&1; then
+            echo "::error::DATA_REPO_TOKEN não enxerga $REPO. O token precisa de acesso de escrita" \
+                 "(contents) nesse repositório."
+            exit 1
+          fi
+          # The commits endpoint answers 409 on an empty repository; anything else means it has history.
+          if gh api "repos/$REPO/commits?per_page=1" >/dev/null 2>&1; then
+            exit 0
+          fi
+          echo "$REPO está vazio — criando o primeiro commit."
+          LEIAME=$(base64 -w0 <<'MD'
+          # lightning-data-prediction
+
+          Saída da previsão de raios, publicada como release pelo workflow do repositório do serviço.
+
+          - Tag `latest`: sobrescrita a cada rodada, é o que o mapa lê.
+          - Tags `YYYY-MM-DD`: a cópia daquele dia, guardada para conferir depois.
+          MD
+          )
+          gh api --method PUT "repos/$REPO/contents/README.md" \
+            -f message="Primeiro commit" -f content="$LEIAME" >/dev/null
+
       - if: steps.config.outputs.ok == 'true'
         uses: actions/checkout@v4
 
