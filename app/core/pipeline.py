@@ -705,6 +705,28 @@ def run_pipeline(
                     for parte in partes:
                         parte.close()
 
+                    # This pass downloads its own `tp`, so the restriction applied to the regional
+                    # datasets never reached it -- and it has to, because the two sources' global
+                    # files are published side by side and a page reads them frame by frame. Same
+                    # reason as there: the accumulations are built below, so trimming has to
+                    # happen first or precip_24h and precip_total would describe a window the file
+                    # no longer holds.
+                    if restrict_times is not None:
+                        wanted = pd.DatetimeIndex(restrict_times)
+                        aligned = pd.DatetimeIndex(ds_mundo["time"].values).intersection(wanted)
+                        if len(aligned) != len(wanted):
+                            # Nothing downstream can repair this one: trimming after the fact
+                            # would break the accumulations, and the raw tp is deleted with the
+                            # work directory. Publishing a worldwide file on a different axis from
+                            # the other source's would break the page the alignment exists for, so
+                            # the failure below drops this source's worldwide file instead. A
+                            # missing layer a page can handle; a misaligned one it cannot.
+                            raise RuntimeError(
+                                f"worldwide rain covers {len(aligned)} of the {len(wanted)} "
+                                "aligned valid times"
+                            )
+                        ds_mundo = ds_mundo.sel(time=aligned)
+
                     ds_global = precipitation.build_precipitation_dataset(
                         ds_mundo, run_date, accum_24h=cfg.precip_accum_24h,
                     )

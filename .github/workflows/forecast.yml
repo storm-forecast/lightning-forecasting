@@ -175,17 +175,14 @@ jobs:
           fi
           echo "rodada: $RUN_DIR"
 
-          # What the consumers are configured to fetch, per source: the smoothed lightning field
-          # and the precipitation products. The per-region files and the unsmoothed merge stay
-          # behind -- they are intermediate, and every asset here costs bandwidth on each poll.
+          # Four assets, two per source: the smoothed lightning field and the worldwide rain.
+          # Everything else the run produces stays in the run directory -- the per-region files and
+          # the unsmoothed merge are intermediate, the South American rain is a subset of the
+          # worldwide file, and every asset here costs bandwidth on each poll.
           ESPERADOS="
             lightning/gfs_prediction_ALL_regions_suavisado.nc
             lightning/ifs_prediction_ALL_regions_suavisado.nc
-            precipitation/gfs_precipitation.nc
-            precipitation/gfs_precipitation_suavisado.nc
             precipitation/gfs_precipitation_global.nc
-            precipitation/ifs_precipitation.nc
-            precipitation/ifs_precipitation_suavisado.nc
             precipitation/ifs_precipitation_global.nc
           "
 
