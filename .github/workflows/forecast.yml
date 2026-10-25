@@ -1,5 +1,5 @@
-# Daily: run the forecast and publish it as a release on lightning-data-prediction, where the map
-# reads it (URL_PREVISAO).
+# Daily: run the forecast from both models (GFS and ECMWF IFS) and publish the products as a
+# release on lightning-data-prediction, where the map reads them.
 #
 # Why here and not on the web service: the pipeline needs TensorFlow plus the ConvLSTM models, which
 # does not fit the 512 MB of a free Render instance -- and a paid one is a second subscription for
@@ -23,6 +23,10 @@ on:
         description: "Reprocessar mesmo se a rodada já existir"
         type: boolean
         default: false
+      sources:
+        description: "Modelos de entrada (gfs, ecmwf, ou os dois separados por vírgula)"
+        required: false
+        default: "gfs,ecmwf"
 
 concurrency:
   group: previsao-release
@@ -147,6 +151,9 @@ jobs:
           KEEP_RUNS: "1"           # the runner is thrown away; only this run matters
           PRECIP_GLOBAL: "true"    # rain needs no model, so it is not confined to South America
           ENABLE_SCHEDULER: "false"
+          # Both models, one run. They are independent: if the ECMWF bucket is late the GFS
+          # products still publish, and vice versa.
+          SOURCES: ${{ inputs.sources || 'gfs,ecmwf' }}
         run: |
           python -m worker.run_daily \
             ${{ inputs.date && format('--date {0}', inputs.date) || '' }} \
@@ -155,34 +162,53 @@ jobs:
       - if: steps.config.outputs.ok == 'true'
         name: Publicar a previsão
         env:
-          DATA_DIR: ${{ runner.temp }}/data
           GH_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
           REPO: storm-forecast/lightning-data-prediction
           TAG: latest
         run: |
           set -e
-          BASE="${{ runner.temp }}/data/products"
-          # Lightning is the one that must exist; the rain files are published when the run made them.
-          RAIOS=$(find "$BASE" -name "gfs_prediction_ALL_regions_suavisado.nc" | sort | tail -1)
-          if [ -z "$RAIOS" ]; then
-            echo "::error::A rodada não deixou o arquivo de raios."
+          RUN_DIR=$(find "${{ runner.temp }}/data/products" -mindepth 1 -maxdepth 1 -type d \
+                      -name '20*' | sort | tail -1)
+          if [ -z "$RUN_DIR" ]; then
+            echo "::error::A rodada não deixou diretório de produtos."
             exit 1
           fi
-          # One rain file, worldwide and unsmoothed: the GFS accumulation as it comes. The regional
-          # and smoothed variants are still produced on disk, and publishing them would be three files
-          # saying nearly the same thing -- the global one contains the regional one.
-          ARQUIVOS="$RAIOS"
-          CHUVA=$(find "$BASE" -name "gfs_precipitation_global.nc" | sort | tail -1)
-          if [ -n "$CHUVA" ]; then
-            ARQUIVOS="$ARQUIVOS $CHUVA"
-          else
-            echo "::warning::sem chuva global nesta rodada"
-          fi
-          for f in $ARQUIVOS; do echo "publicando $(basename "$f") ($(du -h "$f" | cut -f1))"; done
+          echo "rodada: $RUN_DIR"
 
-          # One tag, overwritten: the consumer is configured with a single URL and has no way to learn
-          # a new run id each day. --clobber replaces the asset, which gives it a fresh Last-Modified
-          # and ETag -- the two headers the consumer polls on.
+          # What the consumers are configured to fetch, per source: the smoothed lightning field
+          # and the precipitation products. The per-region files and the unsmoothed merge stay
+          # behind -- they are intermediate, and every asset here costs bandwidth on each poll.
+          ESPERADOS="
+            lightning/gfs_prediction_ALL_regions_suavisado.nc
+            lightning/ifs_prediction_ALL_regions_suavisado.nc
+            precipitation/gfs_precipitation.nc
+            precipitation/gfs_precipitation_suavisado.nc
+            precipitation/gfs_precipitation_global.nc
+            precipitation/ifs_precipitation.nc
+            precipitation/ifs_precipitation_suavisado.nc
+            precipitation/ifs_precipitation_global.nc
+          "
+
+          ARQUIVOS=""
+          for rel in $ESPERADOS; do
+            if [ -f "$RUN_DIR/$rel" ]; then
+              echo "  ok      $rel ($(du -h "$RUN_DIR/$rel" | cut -f1))"
+              ARQUIVOS="$ARQUIVOS $RUN_DIR/$rel"
+            else
+              # Not fatal: a source whose bucket was late leaves its files out, and the other
+              # source's forecast is still worth publishing.
+              echo "::warning::não produzido: $rel"
+            fi
+          done
+
+          if [ -z "$ARQUIVOS" ]; then
+            echo "::error::Nenhum produto esperado foi gerado."
+            exit 1
+          fi
+
+          # One tag, overwritten: the consumer is configured with a single URL and has no way to
+          # learn a new run id each day. --clobber replaces the asset, which gives it a fresh
+          # Last-Modified and ETag -- the two headers the consumer polls on.
           gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1 \
             || gh release create "$TAG" --repo "$REPO" \
                  --title "Previsão mais recente" \
@@ -196,4 +222,8 @@ jobs:
             || gh release create "$DATA" --repo "$REPO" --title "Previsão de $DATA" --notes "Arquivo."
           gh release upload "$DATA" $ARQUIVOS --repo "$REPO" --clobber
 
-          for f in $ARQUIVOS; do echo "https://github.com/$REPO/releases/download/$TAG/$(basename "$f")"; done
+          echo
+          echo "publicado em https://github.com/$REPO/releases/tag/$TAG"
+          for f in $ARQUIVOS; do
+            echo "  https://github.com/$REPO/releases/download/$TAG/$(basename "$f")"
+          done

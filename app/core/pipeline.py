@@ -2,7 +2,7 @@
 
 Steps:
     1. make sure the models are available (Google Drive -> disk)
-    2. download the 00z GFS (two days ago, yesterday, today)
+    2. download the 00z cycle of the chosen source (two days ago, yesterday, today)
     3. compute the atmospheric parameters
     4. build the input dataset and the precipitation dataset
     5. predict lightning per region (classification + regression)
@@ -28,6 +28,7 @@ import xarray as xr
 from app.config import Settings, settings as default_settings
 from app.core import drive, precipitation, state
 from app.core.dataset import build_input_dataset
+from app.core.ecmwf import ECMWFDownloader
 from app.core.gfs import GFSDownloader
 from app.core.parameters import compute_parameters_for_files
 from app.core.predict import (
@@ -37,10 +38,10 @@ from app.core.predict import (
 )
 from app.core.regions import (
     MODEL_VARIABLES,
-    VAR_DETER,
-    VAR_PROB,
+    SOURCE_LABEL,
     get_region_bounds,
     region_meta,
+    source_vars,
 )
 from app.core.smoothing import smooth_dataset
 
@@ -48,11 +49,24 @@ log = logging.getLogger(__name__)
 
 _run_lock = threading.Lock()
 
-MERGED_NAME = "gfs_prediction_ALL_regions_max.nc"
-SMOOTHED_NAME = "gfs_prediction_ALL_regions_suavisado.nc"
-PRECIP_NAME = "gfs_precipitation.nc"
-PRECIP_SMOOTHED_NAME = "gfs_precipitation_suavisado.nc"
-PRECIP_GLOBAL_NAME = "gfs_precipitation_global.nc"
+# The downloader for each source. Both have the same constructor and the same `run()`, which is
+# what lets everything below this line be written once.
+DOWNLOADERS = {"gfs": GFSDownloader, "ecmwf": ECMWFDownloader}
+
+# File name prefix per source. "gfs" is the prefix the release has always carried, so it stays;
+# the IFS products sit beside it rather than replacing it, and a run can hold both.
+PREFIX = {"gfs": "gfs", "ecmwf": "ifs"}
+
+
+def product_names(source: str) -> dict[str, str]:
+    prefix = PREFIX[source]
+    return {
+        "merged": f"{prefix}_prediction_ALL_regions_max.nc",
+        "smoothed": f"{prefix}_prediction_ALL_regions_suavisado.nc",
+        "precip": f"{prefix}_precipitation.nc",
+        "precip_smoothed": f"{prefix}_precipitation_suavisado.nc",
+        "precip_global": f"{prefix}_precipitation_global.nc",
+    }
 
 
 class PipelineBusy(RuntimeError):
@@ -87,9 +101,11 @@ def predict_region(
     ds_synoptic: xr.Dataset,
     region: str,
     cfg: Settings,
+    source: str = "gfs",
 ) -> xr.Dataset | None:
-    """Generate prob-flash-gfs and deter-flash-gfs for one region."""
+    """Generate the probability and deterministic fields for one region."""
 
+    var_prob, var_deter = source_vars(source)
     meta = region_meta(region)
 
     minx, miny, maxx, maxy = get_region_bounds(region, cfg.shapefiles_root)
@@ -120,10 +136,10 @@ def predict_region(
         batch_size=cfg.predict_batch_size,
     )
 
-    ds_class = forecast_to_dataarray(predictions_class, ds, VAR_PROB).to_dataset()
+    ds_class = forecast_to_dataarray(predictions_class, ds, var_prob).to_dataset()
 
     threshold = cfg.prob_threshold
-    ds_class[VAR_PROB] = ds_class[VAR_PROB].where(ds_class[VAR_PROB] > threshold, 0.0)
+    ds_class[var_prob] = ds_class[var_prob].where(ds_class[var_prob] > threshold, 0.0)
 
     predictions_reg, _ = predict_regressor(
         ds, MODEL_VARIABLES,
@@ -136,7 +152,7 @@ def predict_region(
         batch_size=cfg.predict_batch_size,
     )
 
-    ds_reg = forecast_to_dataarray(predictions_reg, ds, VAR_DETER).to_dataset()
+    ds_reg = forecast_to_dataarray(predictions_reg, ds, var_deter).to_dataset()
 
     # The classifier and the regressor may use different windows, so keep
     # only the valid times present in both.
@@ -151,14 +167,14 @@ def predict_region(
     )
 
     # Drop valid times that are entirely null.
-    mask = ~ds_final[VAR_DETER].isnull().all(dim=["lat", "lon"])
+    mask = ~ds_final[var_deter].isnull().all(dim=["lat", "lon"])
     ds_final = ds_final.sel(time=mask)
 
     # With no probability above the threshold there is no predicted lightning.
-    ds_final[VAR_DETER] = ds_final[VAR_DETER].where(ds_final[VAR_PROB] != 0, 0)
+    ds_final[var_deter] = ds_final[var_deter].where(ds_final[var_prob] != 0, 0)
 
-    ds_final[VAR_DETER] = ds_final[VAR_DETER].astype(np.int32)
-    ds_final[VAR_PROB] = ds_final[VAR_PROB].astype(np.float32)
+    ds_final[var_deter] = ds_final[var_deter].astype(np.int32)
+    ds_final[var_prob] = ds_final[var_prob].astype(np.float32)
 
     ds_final.attrs.update(
         region=region,
@@ -180,11 +196,13 @@ def predict_region(
 # ============================================================
 
 
-def merge_regions(datasets: list[xr.Dataset]) -> xr.Dataset:
+def merge_regions(datasets: list[xr.Dataset], source: str = "gfs") -> xr.Dataset:
     """Combine the regions, taking the maximum where they overlap."""
 
+    var_prob, var_deter = source_vars(source)
+
     prepared = [
-        ds[[VAR_PROB, VAR_DETER]].assign_coords(
+        ds[[var_prob, var_deter]].assign_coords(
             lat=np.round(ds["lat"].astype("float64"), 3),
             lon=np.round(ds["lon"].astype("float64"), 3),
         )
@@ -196,16 +214,16 @@ def merge_regions(datasets: list[xr.Dataset]) -> xr.Dataset:
 
     # No coverage means no lightning; probability is zeroed where the
     # deterministic field is 0.
-    deter = merged[VAR_DETER].fillna(0.0)
-    prob = merged[VAR_PROB].where(deter != 0, 0.0).fillna(0.0)
+    deter = merged[var_deter].fillna(0.0)
+    prob = merged[var_prob].where(deter != 0, 0.0).fillna(0.0)
 
-    merged[VAR_DETER] = deter.astype("float32")
-    merged[VAR_PROB] = prob.astype("float32")
+    merged[var_deter] = deter.astype("float32")
+    merged[var_prob] = prob.astype("float32")
 
-    merged[VAR_PROB].attrs.update(
+    merged[var_prob].attrs.update(
         long_name="Probability of lightning occurrence in 6 h", units="1",
     )
-    merged[VAR_DETER].attrs.update(
+    merged[var_deter].attrs.update(
         long_name="Predicted flash count in 6 h", units="flashes/6h",
     )
 
@@ -221,10 +239,17 @@ def run_pipeline(
     cfg: Settings | None = None,
     reference_time: datetime | None = None,
     force: bool = False,
+    source: str = "gfs",
 ) -> dict[str, Any]:
-    """Run the whole daily pipeline. Returns the manifest."""
+    """Run the whole daily pipeline for one source. Returns the manifest.
+
+    Called once per source. A second call for the same run_id adds its products to the manifest
+    already on disk rather than replacing it, so one run directory holds both GFS and IFS.
+    """
 
     cfg = cfg or default_settings
+    var_prob, var_deter = source_vars(source)
+    names = product_names(source)
 
     if not _run_lock.acquire(blocking=False):
         raise PipelineBusy("A run is already in progress.")
@@ -238,8 +263,8 @@ def run_pipeline(
     try:
         reference = reference_time or datetime.now(timezone.utc)
 
-        downloader = GFSDownloader(
-            output_base=cfg.work_dir / "gfs",
+        downloader = DOWNLOADERS[source](
+            output_base=cfg.work_dir / source,
             reference_time=reference,
             horizon_hours=cfg.horizon_hours,
             lon_range=(cfg.lon_min, cfg.lon_max),
@@ -251,9 +276,11 @@ def run_pipeline(
         run_date = downloader.run_date
         run_id = state.run_id_for(run_date)
 
-        existing = state.get_manifest(cfg.products_dir, run_id)
-        if existing and not force:
-            log.info("Run %s already processed; pass force=true to redo it.", run_id)
+        existing = state.get_manifest(cfg.products_dir, run_id) or {}
+        if existing.get("sources", {}).get(source) and not force:
+            log.info(
+                "Run %s already has %s; pass force=true to redo it.", run_id, source,
+            )
             return existing
 
         run_state.start(run_id)
@@ -262,19 +289,19 @@ def run_pipeline(
         run_state.step("Checking the trained models")
         drive.ensure_assets(cfg, force=cfg.refresh_assets_each_run)
 
-        # ---------- 2. GFS ----------
-        run_state.step("Downloading the 00z GFS")
+        # ---------- 2. input data ----------
+        run_state.step(f"Downloading the 00z {source.upper()}")
         gfs_files = downloader.run()
 
         if not gfs_files:
             raise RuntimeError(
-                "No GFS file available. The 00z cycle has most likely not been "
-                "published in the NOAA bucket yet."
+                f"No {source.upper()} file available. The 00z cycle has most likely not "
+                "been published in the bucket yet."
             )
 
         # ---------- 3. parameters ----------
         run_state.step(f"Computing the atmospheric parameters ({len(gfs_files)} lead times)")
-        param_dir = cfg.work_dir / "parameters"
+        param_dir = cfg.work_dir / f"parameters-{source}"
         param_files = compute_parameters_for_files(gfs_files, param_dir)
 
         # ---------- 4. input dataset ----------
@@ -304,7 +331,7 @@ def run_pipeline(
             run_state.step(f"Predicting lightning: {region}")
 
             try:
-                ds_region = predict_region(ds_synoptic, region, cfg)
+                ds_region = predict_region(ds_synoptic, region, cfg, source=source)
             except Exception as error:                          # noqa: BLE001
                 log.exception("%s: prediction failed", region)
                 regions_failed[region] = str(error)
@@ -314,7 +341,7 @@ def run_pipeline(
                 regions_failed[region] = "no valid time predicted"
                 continue
 
-            path = lightning_dir / f"gfs_prediction_{region}.nc"
+            path = lightning_dir / f"{PREFIX[source]}_prediction_{region}.nc"
             _save(ds_region, path)
 
             region_datasets.append(ds_region)
@@ -329,14 +356,14 @@ def run_pipeline(
 
         # ---------- 6. merge and smoothing ----------
         run_state.step(f"Merging {len(region_datasets)} regions")
-        merged = merge_regions(region_datasets)
+        merged = merge_regions(region_datasets, source=source)
         merged.attrs.update(
-            source="GFS",
+            source=SOURCE_LABEL[source],
             run=f"{run_date:%Y-%m-%d} 00 UTC",
             regions=", ".join(regions_ok),
             description="Per-region lightning forecast, merged by maximum",
         )
-        merged_path = _save(merged, lightning_dir / MERGED_NAME)
+        merged_path = _save(merged, lightning_dir / names["merged"])
 
         for ds_region in region_datasets:
             ds_region.close()
@@ -345,11 +372,11 @@ def run_pipeline(
         smoothed = smooth_dataset(
             merged,
             {
-                VAR_DETER: dict(
+                var_deter: dict(
                     upscale=cfg.smooth_upscale, sigma=cfg.smooth_sigma,
                     despeckle=True, vmin=0.0, vmax=None, remask=True,
                 ),
-                VAR_PROB: dict(
+                var_prob: dict(
                     upscale=cfg.smooth_upscale, sigma=cfg.smooth_sigma,
                     despeckle=True, vmin=0.0, vmax=1.0, remask=True,
                 ),
@@ -359,9 +386,9 @@ def run_pipeline(
         smoothed.attrs.update(merged.attrs)
         smoothed.attrs["description"] = (
             "Lightning fields smoothed one valid time at a time "
-            f"(derived from {MERGED_NAME})"
+            f"(derived from {names['merged']})"
         )
-        smoothed_path = _save(smoothed, lightning_dir / SMOOTHED_NAME)
+        smoothed_path = _save(smoothed, lightning_dir / names["smoothed"])
 
         lightning_times = [_iso(t) for t in merged["time"].values]
         lightning_bounds = [
@@ -369,13 +396,13 @@ def run_pipeline(
             float(merged["lon"].max()), float(merged["lat"].max()),
         ]
         lightning_stats = {
-            VAR_PROB: {
-                "min": float(merged[VAR_PROB].min()),
-                "max": float(merged[VAR_PROB].max()),
+            var_prob: {
+                "min": float(merged[var_prob].min()),
+                "max": float(merged[var_prob].max()),
             },
-            VAR_DETER: {
-                "min": float(merged[VAR_DETER].min()),
-                "max": float(merged[VAR_DETER].max()),
+            var_deter: {
+                "min": float(merged[var_deter].min()),
+                "max": float(merged[var_deter].max()),
             },
         }
 
@@ -394,7 +421,7 @@ def run_pipeline(
                 ds_precip, run_date, accum_24h=cfg.precip_accum_24h,
             )
             precip_path = precipitation.save_precipitation(
-                ds_precipitation, precip_dir / PRECIP_NAME,
+                ds_precipitation, precip_dir / names["precip"],
             )
 
             files = {"netcdf": f"{state.PRECIP_SUBDIR}/{precip_path.name}"}
@@ -412,7 +439,7 @@ def run_pipeline(
                 )
                 ds_precip_smooth.attrs.update(ds_precipitation.attrs)
                 precip_smooth_path = precipitation.save_precipitation(
-                    ds_precip_smooth, precip_dir / PRECIP_SMOOTHED_NAME,
+                    ds_precip_smooth, precip_dir / names["precip_smoothed"],
                 )
                 files["netcdf_suavizado"] = (
                     f"{state.PRECIP_SUBDIR}/{precip_smooth_path.name}"
@@ -421,9 +448,9 @@ def run_pipeline(
 
             # ---------- 7b. precipitation, worldwide ----------
             #
-            # Same product, no region. It exists because precipitation comes straight out of GFS and
-            # GFS is global: the South American crop is a choice the lightning models force, not one
-            # the rain needs.
+            # Same product, no region. It exists because precipitation comes straight out of the
+            # forecast model and the model is global: the South American crop is a choice the
+            # lightning models force, not one the rain needs.
             #
             # A separate download rather than a wider one for everything: the models are trained per
             # region and cannot be applied elsewhere, while the fifteen parameters that feed them would
@@ -433,9 +460,9 @@ def run_pipeline(
             if cfg.precip_global:
                 run_state.step("Generating the worldwide precipitation")
                 try:
-                    mundo = GFSDownloader(
-                        output_base=cfg.work_dir / "gfs_global",
-                        reference_time=reference_time,
+                    mundo = DOWNLOADERS[source](
+                        output_base=cfg.work_dir / f"{source}_global",
+                        reference_time=reference,
                         horizon_hours=cfg.horizon_hours,
                         lon_range=(cfg.precip_global_lon_min, cfg.precip_global_lon_max),
                         lat_range=(cfg.precip_global_lat_min, cfg.precip_global_lat_max),
@@ -465,7 +492,7 @@ def run_pipeline(
                         ds_mundo, run_date, accum_24h=cfg.precip_accum_24h,
                     )
                     global_path = precipitation.save_precipitation(
-                        ds_global, precip_dir / PRECIP_GLOBAL_NAME,
+                        ds_global, precip_dir / names["precip_global"],
                     )
                     files["netcdf_global"] = f"{state.PRECIP_SUBDIR}/{global_path.name}"
                     log.info("worldwide precipitation: %s (%.1f MB, %s)", global_path.name,
@@ -509,39 +536,55 @@ def run_pipeline(
         ds_precip.close()
 
         # ---------- 8. manifest ----------
-        manifest: dict[str, Any] = {
-            "run_id": run_id,
-            "run_time": f"{run_date:%Y-%m-%dT00:00:00}Z",
+        products: dict[str, Any] = {
+            "lightning": {
+                "variables": [var_prob, var_deter],
+                "threshold": cfg.prob_threshold,
+                "times": lightning_times,
+                "bounds": lightning_bounds,
+                "stats": lightning_stats,
+                "files": {
+                    "netcdf": f"{state.LIGHTNING_SUBDIR}/{merged_path.name}",
+                    "netcdf_suavizado": (
+                        f"{state.LIGHTNING_SUBDIR}/{smoothed_path.name}"
+                    ),
+                    "por_regiao": region_files,
+                },
+            },
+        }
+
+        if precip_entry is not None:
+            products["precipitation"] = precip_entry
+
+        entry: dict[str, Any] = {
+            "source": SOURCE_LABEL[source],
             "generated_at": state.utcnow_iso(),
             "duration_seconds": round(time.monotonic() - started, 1),
-            "source": "GFS 0.25 deg (NOAA), 00 UTC cycle",
-            "horizon_hours": cfg.horizon_hours,
             "input_times": input_times,
             "regions": {
                 "processed": regions_ok,
                 "failed": regions_failed,
                 "labels": {r: region_meta(r).label for r in regions_ok},
             },
-            "products": {
-                "lightning": {
-                    "variables": [VAR_PROB, VAR_DETER],
-                    "threshold": cfg.prob_threshold,
-                    "times": lightning_times,
-                    "bounds": lightning_bounds,
-                    "stats": lightning_stats,
-                    "files": {
-                        "netcdf": f"{state.LIGHTNING_SUBDIR}/{merged_path.name}",
-                        "netcdf_suavizado": (
-                            f"{state.LIGHTNING_SUBDIR}/{smoothed_path.name}"
-                        ),
-                        "por_regiao": region_files,
-                    },
-                },
-            },
+            "products": products,
         }
 
-        if precip_entry is not None:
-            manifest["products"]["precipitation"] = precip_entry
+        # Read again rather than reuse `existing`: the other source may have finished and saved
+        # while this one was running, and its products must not be dropped.
+        manifest: dict[str, Any] = dict(state.get_manifest(cfg.products_dir, run_id) or {})
+        manifest["run_id"] = run_id
+        manifest["run_time"] = f"{run_date:%Y-%m-%dT00:00:00}Z"
+        manifest["horizon_hours"] = cfg.horizon_hours
+        manifest.setdefault("sources", {})[source] = entry
+
+        # The top level keeps meaning GFS, because that is what /api/v1/status, /lightning and the
+        # map already read. The per-source detail lives under "sources"; a run with no GFS at all
+        # fills the top level from whichever source did run, so those endpoints still answer.
+        if source == "gfs" or "products" not in manifest:
+            manifest.update(
+                {k: v for k, v in entry.items() if k != "products"},
+                products=products,
+            )
 
         state.save_manifest(cfg.products_dir, run_id, manifest)
         state.set_latest(cfg.products_dir, run_id)

@@ -102,6 +102,11 @@ class Settings(BaseSettings):
     # Regions to process (empty = every region in regions.py).
     regions: str = ""
 
+    # Input models to run, comma separated, in order. "gfs,ecmwf" produces both forecasts from the
+    # same run; "gfs" alone is what the service did before ECMWF was added. A source that fails is
+    # logged and skipped -- see worker/run_daily.py.
+    sources: str = "gfs"
+
     # ========================================================
     # Google Drive (where the models live)
     #
@@ -200,6 +205,18 @@ class Settings(BaseSettings):
         if not self.regions.strip():
             return list(DEFAULT_REGIONS)
         return [r.strip() for r in self.regions.split(",") if r.strip()]
+
+    @property
+    def source_list(self) -> list[str]:
+        from app.core.pipeline import DOWNLOADERS
+
+        wanted = [s.strip().lower() for s in self.sources.split(",") if s.strip()]
+        unknown = [s for s in wanted if s not in DOWNLOADERS]
+        if unknown:
+            raise ValueError(
+                f"Unknown source(s) {unknown}; expected from {sorted(DOWNLOADERS)}"
+            )
+        return wanted or ["gfs"]
 
     @property
     def cors_origin_list(self) -> list[str]:

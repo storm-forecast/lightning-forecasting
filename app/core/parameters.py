@@ -17,11 +17,14 @@ import xarray as xr
 
 log = logging.getLogger(__name__)
 
-FILENAME_RE = re.compile(r"gfs\.(\d{8})\.00z\.f(\d{3})\.nc$")
+# gfs.* or ifs.*: the two downloaders write the same fields under the same names, so the only
+# thing that distinguishes their files here is the prefix -- and nothing below needs to know
+# which one it is reading.
+FILENAME_RE = re.compile(r"(?:gfs|ifs)\.(\d{8})\.00z\.f(\d{3})\.nc$")
 
 
 class AtmosphericParameters:
-    """Reads one GFS NetCDF and returns the dataset with the indices added."""
+    """Reads one source NetCDF (GFS or IFS) and returns the dataset with the indices added."""
 
     def __init__(self, path_file: str | Path) -> None:
         self.path_file = Path(path_file)

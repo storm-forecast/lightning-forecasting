@@ -96,6 +96,31 @@ RENAME_TO_MODEL = {
 VAR_PROB = "prob-flash-gfs"
 VAR_DETER = "deter-flash-gfs"
 
+# The published variable names, per input source. GFS keeps the names it has always had -- the map
+# that reads the release is configured with them, and renaming them would break it to no purpose.
+# Keeping the two sources under different names also means both can sit in one dataset later
+# without a collision.
+SOURCE_VARS: dict[str, tuple[str, str]] = {
+    "gfs": (VAR_PROB, VAR_DETER),
+    "ecmwf": ("prob-flash-ifs", "deter-flash-ifs"),
+}
+
+# What each source is called in the manifest and in the file attributes.
+SOURCE_LABEL: dict[str, str] = {
+    "gfs": "GFS 0.25 deg (NOAA), 00 UTC cycle",
+    "ecmwf": "ECMWF IFS 0.25 deg (open data, oper), 00 UTC cycle",
+}
+
+
+def source_vars(source: str) -> tuple[str, str]:
+    """(probability, deterministic) variable names for one source."""
+    try:
+        return SOURCE_VARS[source]
+    except KeyError:
+        raise ValueError(
+            f"Unknown source {source!r}; expected one of {sorted(SOURCE_VARS)}"
+        ) from None
+
 
 # ============================================================
 # Bounding box

@@ -2,7 +2,7 @@
 #
 # This service only SERVES: status, manifests, and the files of whatever runs are on disk. It does not
 # compute the forecast any more -- that moved to .github/workflows/forecast.yml, which runs on a GitHub
-# runner and publishes to R2.
+# runner and publishes the products as a release on lightning-data-prediction.
 #
 # Why it moved: the pipeline loads TensorFlow plus the ConvLSTM models. TensorFlow alone takes 425 MB
 # just to import (measured), against the 512 MB of a free instance, and a free instance has no
@@ -10,7 +10,7 @@
 # that fits is a second subscription for something that runs once a day. A GitHub runner has 7 GB of
 # RAM, real cron, and costs nothing on this schedule.
 #
-# So: free plan, no disk, scheduler off. The map reads the forecast from the bucket, not from here.
+# So: free plan, no disk, scheduler off. The map reads the forecast from the release, not from here.
 
 services:
   - type: web
