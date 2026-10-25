@@ -231,6 +231,200 @@ def merge_regions(datasets: list[xr.Dataset], source: str = "gfs") -> xr.Dataset
 
 
 # ============================================================
+# One time axis for every source
+#
+# The two sources must publish the same valid times, or a page that steps through both frame by
+# frame breaks. They can diverge for two reasons: a step missing from one bucket (the ECMWF open
+# data keeps only about four days and lands later than the GFS), and the all-null drop in
+# predict_region, which depends on the data rather than on the configuration.
+#
+# Precipitation has to be aligned BEFORE it is built: precip_24h is a rolling sum of four and
+# precip_total covers the window, so trimming time afterwards would leave both lying about what
+# they accumulate. Lightning can be aligned afterwards, because merging and smoothing work one
+# valid time at a time. Hence two mechanisms: restrict_times on the way in, and
+# align_lightning_times as the net underneath.
+# ============================================================
+
+
+def prepare_inputs(
+    cfg: Settings,
+    reference_time: datetime | None,
+    source: str,
+) -> pd.DatetimeIndex:
+    """Download one source and compute its parameters, returning the valid times it can offer.
+
+    Cheap to call twice: the downloader skips lead times whose NetCDF is already on disk and
+    compute_parameters_for_files skips parameters already computed, so the run that follows reuses
+    all of this instead of fetching it again.
+    """
+
+    downloader = DOWNLOADERS[source](
+        output_base=cfg.work_dir / source,
+        reference_time=reference_time,
+        horizon_hours=cfg.horizon_hours,
+        lon_range=(cfg.lon_min, cfg.lon_max),
+        lat_range=(cfg.lat_min, cfg.lat_max),
+        max_workers=cfg.gfs_max_workers,
+        cleanup_grib=cfg.cleanup_grib,
+    )
+
+    files = downloader.run()
+    if not files:
+        raise RuntimeError(
+            f"No {source.upper()} file available. The 00z cycle has most likely not been "
+            "published in the bucket yet."
+        )
+
+    compute_parameters_for_files(files, cfg.work_dir / f"parameters-{source}")
+
+    # The valid time of each file is the time axis build_input_dataset will produce, so there is
+    # nothing to open to find it out.
+    #
+    # A DatetimeIndex rather than datetime64 in a set, here and everywhere these times are
+    # compared: datetime64 hashes by unit, so a [s] value and the identical [ns] value compare
+    # equal and hash differently, and `in set` silently answers False. That would turn every
+    # alignment below into a no-op that logs nothing.
+    return pd.DatetimeIndex(
+        sorted({f.valid_time.replace(tzinfo=None) for f in files})
+    )
+
+
+def common_times(
+    per_source: dict[str, pd.DatetimeIndex],
+) -> pd.DatetimeIndex | None:
+    """The valid times every source can offer, or None when restricting would not help."""
+
+    if len(per_source) < 2:
+        return None
+
+    axes = list(per_source.values())
+    common = axes[0]
+    for other in axes[1:]:
+        common = common.intersection(other)
+
+    if len(common) == 0:
+        log.warning(
+            "The sources share no valid time (%s); each will run on its own series.",
+            {k: len(v) for k, v in per_source.items()},
+        )
+        return None
+
+    dropped = {
+        source: len(times) - len(common)
+        for source, times in per_source.items()
+        if len(times) != len(common)
+    }
+    if dropped:
+        log.warning("Aligning the sources drops %s lead times to match", dropped)
+    else:
+        log.info("The sources already agree on %d valid times", len(common))
+
+    return common.sort_values()
+
+
+def align_lightning_times(cfg: Settings, run_id: str) -> list[str] | None:
+    """Trim every source's lightning products to the valid times they share.
+
+    The net under restrict_times, for the all-null drop that happens inside the prediction. A
+    no-op in the normal case, where the axes already agree.
+    """
+
+    manifest = state.get_manifest(cfg.products_dir, run_id)
+    if not manifest:
+        return None
+
+    sources = {
+        source: entry for source, entry in manifest.get("sources", {}).items()
+        if entry.get("products", {}).get("lightning")
+    }
+    if len(sources) < 2:
+        return None
+
+    axes = {
+        source: entry["products"]["lightning"]["times"]
+        for source, entry in sources.items()
+    }
+    shared = None
+    for times in axes.values():
+        index = pd.DatetimeIndex([pd.Timestamp(t).tz_convert(None) for t in times])
+        shared = index if shared is None else shared.intersection(index)
+    common = [_iso(t) for t in shared.sort_values()]
+
+    if not common:
+        log.error(
+            "The sources' lightning products share no valid time (%s); left untouched.",
+            {k: len(v) for k, v in axes.items()},
+        )
+        return None
+
+    if any(len(t) != len(common) for t in axes.values()):
+        log.warning(
+            "Trimming the lightning products to %d shared valid times (from %s)",
+            len(common), {k: len(v) for k, v in axes.items()},
+        )
+    else:
+        # Still worth walking through: the manifest should say the axes agree, which is what a
+        # consumer checks. Nothing is rewritten in this case but the manifest itself.
+        log.info("The lightning products already share %d valid times", len(common))
+
+    run_directory = state.run_dir(cfg.products_dir, run_id)
+    # The manifest carries what _iso wrote, which is tz-aware ("+00:00"); the datasets store
+    # naive UTC.
+    keep = pd.DatetimeIndex([pd.Timestamp(t).tz_convert(None) for t in common])
+
+    for source, entry in sources.items():
+        lightning = entry["products"]["lightning"]
+        # Recorded on every source, including one that needed no trimming: what a consumer wants
+        # to know is that the axes agree, not which file happened to be rewritten.
+        lightning["times"] = common
+        lightning["aligned_to_sources"] = sorted(sources)
+
+        if len(axes[source]) == len(common):
+            continue
+
+        relatives = [lightning["files"]["netcdf"], lightning["files"]["netcdf_suavizado"]]
+        relatives += list(lightning["files"].get("por_regiao", {}).values())
+
+        for relative in relatives:
+            path = run_directory / relative
+            if not path.exists():
+                continue
+            with xr.open_dataset(path) as handle:
+                # A region file only holds the times that region predicted, so intersect per
+                # file rather than selecting the run's whole list.
+                present = pd.DatetimeIndex(handle["time"].values).intersection(keep)
+                trimmed = handle.sel(time=present).load()
+            # A dataset read back from disk carries that file's encoding, whose chunk sizes
+            # describe the untrimmed time dimension -- writing fewer times with them is rejected
+            # by netCDF as an invalid argument.
+            for variable in trimmed.variables.values():
+                variable.encoding = {}
+            _save(trimmed, path)
+            trimmed.close()
+
+        var_prob, var_deter = source_vars(source)
+        merged_path = run_directory / lightning["files"]["netcdf"]
+        with xr.open_dataset(merged_path) as handle:
+            lightning["stats"] = {
+                var_prob: {
+                    "min": float(handle[var_prob].min()),
+                    "max": float(handle[var_prob].max()),
+                },
+                var_deter: {
+                    "min": float(handle[var_deter].min()),
+                    "max": float(handle[var_deter].max()),
+                },
+            }
+
+    if manifest.get("products", {}).get("lightning"):
+        primary = "gfs" if "gfs" in sources else sorted(sources)[0]
+        manifest["products"]["lightning"] = sources[primary]["products"]["lightning"]
+
+    state.save_manifest(cfg.products_dir, run_id, manifest)
+    return common
+
+
+# ============================================================
 # Full run
 # ============================================================
 
@@ -240,11 +434,17 @@ def run_pipeline(
     reference_time: datetime | None = None,
     force: bool = False,
     source: str = "gfs",
+    restrict_times: list | None = None,
+    cleanup: bool | None = None,
 ) -> dict[str, Any]:
     """Run the whole daily pipeline for one source. Returns the manifest.
 
     Called once per source. A second call for the same run_id adds its products to the manifest
     already on disk rather than replacing it, so one run directory holds both GFS and IFS.
+
+    restrict_times limits the run to these valid times, which is how two sources end up publishing
+    the same period -- see the section above. cleanup overrides cfg.cleanup_workdir, so an
+    orchestrator running several sources can keep the downloads until the last one is done.
     """
 
     cfg = cfg or default_settings
@@ -307,6 +507,23 @@ def run_pipeline(
         # ---------- 4. input dataset ----------
         run_state.step("Building the input dataset")
         ds_synoptic, ds_precip = build_input_dataset(param_files)
+
+        if restrict_times is not None:
+            # Intersect rather than select: a time this source never had would raise, and the
+            # caller's list was built from every source.
+            wanted = pd.DatetimeIndex(restrict_times)
+            keep = pd.DatetimeIndex(ds_synoptic["time"].values).intersection(wanted)
+            if len(keep) == 0:
+                raise RuntimeError(
+                    f"{source}: none of its valid times is in the aligned set"
+                )
+            dropped = ds_synoptic.sizes["time"] - len(keep)
+            if dropped:
+                log.info("%s: %d valid times dropped to align the sources", source, dropped)
+            ds_synoptic = ds_synoptic.sel(time=keep)
+            ds_precip = ds_precip.sel(
+                time=pd.DatetimeIndex(ds_precip["time"].values).intersection(wanted)
+            )
 
         input_times = [_iso(t) for t in ds_synoptic["time"].values]
 
@@ -590,7 +807,7 @@ def run_pipeline(
         state.set_latest(cfg.products_dir, run_id)
         state.prune_runs(cfg.products_dir, cfg.keep_runs)
 
-        if cfg.cleanup_workdir:
+        if cfg.cleanup_workdir if cleanup is None else cleanup:
             shutil.rmtree(cfg.work_dir, ignore_errors=True)
 
         run_state.finish(run_id)
