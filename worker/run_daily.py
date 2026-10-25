@@ -27,7 +27,9 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
+import traceback
 from datetime import datetime, timezone
 
 from app.config import settings
@@ -39,6 +41,37 @@ from app.core.pipeline import (
     prepare_inputs,
     run_pipeline,
 )
+
+
+def relatar(failed: dict[str, str], tracos: dict[str, str], pedidas: list[str]) -> None:
+    """Make a source's failure visible where somebody is already looking.
+
+    A source failing is not a failed run -- the other one is still worth publishing, and that is the
+    right behaviour. The cost of it is that a permanently broken source looks like a quiet success for
+    as long as nobody opens the log: the run is green, the release appears, and two of the four files
+    are simply never there. That is how the ECMWF side went missing for days without anyone noticing.
+
+    So the failure is written where it cannot be missed: an ::error:: annotation, which GitHub lists at
+    the top of the run page next to the warnings, and the job summary, which is the first thing the page
+    shows. Neither fails the run.
+    """
+    if not failed:
+        return
+    for source, erro in failed.items():
+        # One line, no newlines: an annotation stops at the first break.
+        print(f"::error title=Fonte {source} falhou::{erro}".replace("\n", " "), flush=True)
+
+    resumo = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not resumo:
+        return
+    with open(resumo, "a", encoding="utf-8") as saida:
+        saida.write("## Fontes que falharam\n\n")
+        saida.write(f"Pedidas: `{', '.join(pedidas) or '(nenhuma)'}`\n\n")
+        for source, erro in failed.items():
+            saida.write(f"### {source}\n\n```\n{erro}\n```\n\n")
+            traco = tracos.get(source)
+            if traco:
+                saida.write(f"<details><summary>Traceback</summary>\n\n```\n{traco}```\n\n</details>\n\n")
 
 
 def main() -> int:
@@ -70,9 +103,13 @@ def main() -> int:
         reference = datetime.strptime(args.date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
 
     sources = args.source or settings.source_list
+    # Kept because `sources` is filtered below to the ones that could offer their input: the report
+    # should say what was asked for, not what survived.
+    pedidas = list(sources)
 
     manifest = None
     failed: dict[str, str] = {}
+    tracos: dict[str, str] = {}
 
     # ---- phase 1: what each source can offer, and what they share
     shared = None
@@ -85,8 +122,9 @@ def main() -> int:
                 available[source] = prepare_inputs(settings, reference, source)
             except Exception as error:                          # noqa: BLE001
                 # Cheaper here than after the models are loaded, and the other source carries on.
-                log.error("%s failed while preparing its input: %s", source, error)
+                log.error("%s failed while preparing its input: %s", source, error, exc_info=True)
                 failed[source] = f"{type(error).__name__}: {error}"
+                tracos[source] = traceback.format_exc()
         sources = [s for s in sources if s in available]
         shared = common_times(available)
         if shared is not None:
@@ -109,11 +147,13 @@ def main() -> int:
         except Exception as error:                              # noqa: BLE001
             # One source failing is a worse forecast, not a failed run: the other one is still
             # worth publishing, and the manifest records which source is missing.
-            log.error("%s failed: %s", source, error)
+            log.error("%s failed: %s", source, error, exc_info=True)
             failed[source] = f"{type(error).__name__}: {error}"
+            tracos[source] = traceback.format_exc()
 
     if manifest is None:
         log.error("No source finished: %s", failed)
+        relatar(failed, tracos, pedidas)
         return 1
 
     # ---- phase 3: the net under the prediction's own dropping of valid times
@@ -131,6 +171,7 @@ def main() -> int:
             print(f"  {name}: {product['files']}")
     for source, error in failed.items():
         print(f"\n{source}: FAILED -- {error}")
+    relatar(failed, tracos, pedidas)
     return 0
 
 
