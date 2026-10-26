@@ -738,6 +738,7 @@ def run_pipeline(
                     files["netcdf_global"] = f"{state.PRECIP_SUBDIR}/{global_path.name}"
                     log.info("worldwide precipitation: %s (%.1f MB, %s)", global_path.name,
                              global_path.stat().st_size / 1e6, dict(ds_global.sizes))
+
                     ds_global.close()
                     ds_mundo.close()
                 except Exception as error:                              # noqa: BLE001

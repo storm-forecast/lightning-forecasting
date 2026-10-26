@@ -181,15 +181,20 @@ jobs:
           # Everything else the run produces stays in the run directory -- the per-region files and
           # the unsmoothed merges are intermediate, and every asset here costs bandwidth on each poll.
           #
-          # The rain published is the smoothed South American file, not the worldwide one. Smoothed,
-          # because it is what the map draws and the raw 0.25 degree grid reads as a staircase at any
-          # zoom a reader uses; South American, because that is the ground the lightning covers and a
-          # rain map that reaches further than the lightning invites a comparison that cannot be made.
+          # The rain published is worldwide, and carries the one variable the consumer reads. Worldwide
+          # because rain comes straight out of the forecast model and the model is global: the South
+          # American crop is a choice the lightning models force, not one the rain needs, and a reader
+          # looking at Angola is owed the same answer as one looking at Goiás. It was published cropped
+          # for a day and that was wrong.
+          #
+          # The file carries three variables and the consumer reads one, which costs nothing: the reader
+          # selects precip_6h before loading, so the other two never leave the disk -- measured at
+          # 143 MB against the 202 the whole file costs.
           ESPERADOS="
             lightning/gfs_prediction_ALL_regions_suavisado.nc
             lightning/ecens_prediction_ALL_regions_suavisado.nc
-            precipitation/gfs_precipitation_suavisado.nc
-            precipitation/ecens_precipitation_suavisado.nc
+            precipitation/gfs_precipitation_global.nc
+            precipitation/ecens_precipitation_global.nc
           "
 
           ARQUIVOS=""
@@ -263,8 +268,8 @@ jobs:
             primeiro=1
             for rel in lightning/gfs_prediction_ALL_regions_suavisado.nc \
                        lightning/ecens_prediction_ALL_regions_suavisado.nc \
-                       precipitation/gfs_precipitation_suavisado.nc \
-                       precipitation/ecens_precipitation_suavisado.nc; do
+                       precipitation/gfs_precipitation_global.nc \
+                       precipitation/ecens_precipitation_global.nc; do
               existe=false
               [ -n "$RUN_DIR" ] && [ -f "$RUN_DIR/$rel" ] && existe=true
               [ $primeiro -eq 0 ] && echo ","
@@ -308,8 +313,8 @@ jobs:
           echo >> "$RESUMO"
           for rel in lightning/gfs_prediction_ALL_regions_suavisado.nc \
                      lightning/ecens_prediction_ALL_regions_suavisado.nc \
-                     precipitation/gfs_precipitation_suavisado.nc \
-                     precipitation/ecens_precipitation_suavisado.nc; do
+                     precipitation/gfs_precipitation_global.nc \
+                     precipitation/ecens_precipitation_global.nc; do
             if [ -f "$RUN_DIR/$rel" ]; then
               echo "- ✅ \`$rel\` ($(du -h "$RUN_DIR/$rel" | cut -f1))" >> "$RESUMO"
             else
