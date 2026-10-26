@@ -175,15 +175,19 @@ jobs:
           fi
           echo "rodada: $RUN_DIR"
 
-          # Four assets, two per source: the smoothed lightning field and the worldwide rain.
+          # Four assets, two per source: the smoothed lightning field and the smoothed rain.
           # Everything else the run produces stays in the run directory -- the per-region files and
-          # the unsmoothed merge are intermediate, the South American rain is a subset of the
-          # worldwide file, and every asset here costs bandwidth on each poll.
+          # the unsmoothed merges are intermediate, and every asset here costs bandwidth on each poll.
+          #
+          # The rain published is the smoothed South American file, not the worldwide one. Smoothed,
+          # because it is what the map draws and the raw 0.25 degree grid reads as a staircase at any
+          # zoom a reader uses; South American, because that is the ground the lightning covers and a
+          # rain map that reaches further than the lightning invites a comparison that cannot be made.
           ESPERADOS="
             lightning/gfs_prediction_ALL_regions_suavisado.nc
-            lightning/ifs_prediction_ALL_regions_suavisado.nc
-            precipitation/gfs_precipitation_global.nc
-            precipitation/ifs_precipitation_global.nc
+            lightning/ecens_prediction_ALL_regions_suavisado.nc
+            precipitation/gfs_precipitation_suavisado.nc
+            precipitation/ecens_precipitation_suavisado.nc
           "
 
           ARQUIVOS=""

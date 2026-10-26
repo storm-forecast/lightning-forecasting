@@ -53,9 +53,11 @@ _run_lock = threading.Lock()
 # what lets everything below this line be written once.
 DOWNLOADERS = {"gfs": GFSDownloader, "ecmwf": ECMWFDownloader}
 
-# File name prefix per source. "gfs" is the prefix the release has always carried, so it stays;
-# the IFS products sit beside it rather than replacing it, and a run can hold both.
-PREFIX = {"gfs": "gfs", "ecmwf": "ifs"}
+# File name prefix per source. "gfs" is the prefix the release has always carried, so it stays; the
+# ECMWF products sit beside it rather than replacing it, and a run can hold both. The ECMWF files are
+# called "ecens" because that is the name the page shows the reader -- "ifs" is the model's name inside
+# the centre, and a file named after what nobody calls it is a file somebody has to translate.
+PREFIX = {"gfs": "gfs", "ecmwf": "ecens"}
 
 
 def product_names(source: str) -> dict[str, str]:
