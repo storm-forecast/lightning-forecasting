@@ -154,6 +154,8 @@ jobs:
           # Both models, one run. They are independent: if the ECMWF bucket is late the GFS
           # products still publish, and vice versa.
           SOURCES: ${{ inputs.sources || 'gfs,ecmwf' }}
+          # Where a failed source leaves its reason, for the step that publishes the run's state.
+          FALHAS_JSON: ${{ runner.temp }}/falhas.json
         run: |
           python -m worker.run_daily \
             ${{ inputs.date && format('--date {0}', inputs.date) || '' }} \
@@ -233,6 +235,50 @@ jobs:
       # step inside it, and three times in a row an old run was read as the current one -- there is no
       # date in an annotation and no sign of which commit produced it. This writes the verdict on the
       # first screen of the run page: which commit ran, what it managed to produce, and what it did not.
+      # The run's own account of itself, published where anybody can read it without access to this
+      # repository. Everything above writes into the run page, which is private: when something goes
+      # wrong, the only thing visible from outside is that two of the four files are missing, and that
+      # says nothing about why. This puts the outcome next to the data it describes.
+      #
+      # The exception's type and message, not the traceback: enough to know what broke, without
+      # publishing the runner's paths.
+      - if: always() && steps.config.outputs.ok == 'true'
+        name: Publicar o estado da rodada
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
+          REPO: storm-forecast/lightning-data-prediction
+          TAG: latest
+        run: |
+          RUN_DIR=$(find "${{ runner.temp }}/data/products" -mindepth 1 -maxdepth 1 -type d \
+                      -name '20*' 2>/dev/null | sort | tail -1)
+          ESTADO="${{ runner.temp }}/estado.json"
+          {
+            echo "{"
+            echo "  \"commit\": \"${GITHUB_SHA:0:8}\","
+            echo "  \"rodada\": \"$([ -n "$RUN_DIR" ] && basename "$RUN_DIR" || echo null)\","
+            echo "  \"terminou_em\": \"$(date -u '+%Y-%m-%dT%H:%M:%SZ')\","
+            echo "  \"situacao\": \"${{ job.status }}\","
+            echo "  \"produzidos\": ["
+            primeiro=1
+            for rel in lightning/gfs_prediction_ALL_regions_suavisado.nc \
+                       lightning/ecens_prediction_ALL_regions_suavisado.nc \
+                       precipitation/gfs_precipitation_suavisado.nc \
+                       precipitation/ecens_precipitation_suavisado.nc; do
+              existe=false
+              [ -n "$RUN_DIR" ] && [ -f "$RUN_DIR/$rel" ] && existe=true
+              [ $primeiro -eq 0 ] && echo ","
+              printf '    {"arquivo": "%s", "existe": %s}' "$rel" "$existe"
+              primeiro=0
+            done
+            echo
+            echo "  ],"
+            echo "  \"falhas\": $(cat "${{ runner.temp }}/falhas.json" 2>/dev/null || echo '{}')"
+            echo "}"
+          } > "$ESTADO"
+          cat "$ESTADO"
+          gh release upload "$TAG" "$ESTADO#estado.json" --repo "$REPO" --clobber || true
+
       - if: always()
         name: Veredito
         env:

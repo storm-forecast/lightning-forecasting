@@ -26,6 +26,7 @@ Phase 1 is why a source that cannot deliver its data fails before any model is l
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -60,6 +61,17 @@ def relatar(failed: dict[str, str], tracos: dict[str, str], pedidas: list[str]) 
     for source, erro in failed.items():
         # One line, no newlines: an annotation stops at the first break.
         print(f"::error title=Fonte {source} falhou::{erro}".replace("\n", " "), flush=True)
+
+    # Left where the workflow can pick it up and publish it beside the data, so the outcome is readable
+    # without access to this repository. The type and the message, not the traceback: the traceback
+    # carries the runner's paths and belongs in the run page, which is private.
+    destino = os.environ.get("FALHAS_JSON")
+    if destino:
+        try:
+            with open(destino, "w", encoding="utf-8") as saida:
+                json.dump(failed, saida, ensure_ascii=False)
+        except OSError as erro:
+            log.warning("could not write %s: %s", destino, erro)
 
     resumo = os.environ.get("GITHUB_STEP_SUMMARY")
     if not resumo:
