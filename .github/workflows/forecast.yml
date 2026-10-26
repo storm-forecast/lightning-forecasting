@@ -228,3 +228,45 @@ jobs:
           for f in $ARQUIVOS; do
             echo "  https://github.com/$REPO/releases/download/$TAG/$(basename "$f")"
           done
+
+      # Always, whatever happened above. Reading a run meant opening the right one and finding the right
+      # step inside it, and three times in a row an old run was read as the current one -- there is no
+      # date in an annotation and no sign of which commit produced it. This writes the verdict on the
+      # first screen of the run page: which commit ran, what it managed to produce, and what it did not.
+      - if: always()
+        name: Veredito
+        env:
+          REPO: storm-forecast/lightning-data-prediction
+        run: |
+          RESUMO="${GITHUB_STEP_SUMMARY}"
+          {
+            echo "## Veredito"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| commit | \`${GITHUB_SHA:0:8}\` |"
+            echo "| disparo | ${GITHUB_EVENT_NAME} |"
+            echo "| terminou em | $(date -u '+%Y-%m-%d %H:%M UTC') |"
+            echo "| situação até aqui | ${{ job.status }} |"
+            echo
+          } >> "$RESUMO"
+
+          RUN_DIR=$(find "${{ runner.temp }}/data/products" -mindepth 1 -maxdepth 1 -type d \
+                      -name '20*' 2>/dev/null | sort | tail -1)
+          if [ -z "$RUN_DIR" ]; then
+            echo "A rodada não chegou a deixar diretório de produtos." >> "$RESUMO"
+            exit 0
+          fi
+
+          echo "Produzido em \`$(basename "$RUN_DIR")\`:" >> "$RESUMO"
+          echo >> "$RESUMO"
+          for rel in lightning/gfs_prediction_ALL_regions_suavisado.nc \
+                     lightning/ecens_prediction_ALL_regions_suavisado.nc \
+                     precipitation/gfs_precipitation_suavisado.nc \
+                     precipitation/ecens_precipitation_suavisado.nc; do
+            if [ -f "$RUN_DIR/$rel" ]; then
+              echo "- ✅ \`$rel\` ($(du -h "$RUN_DIR/$rel" | cut -f1))" >> "$RESUMO"
+            else
+              echo "- ❌ \`$rel\` — não produzido" >> "$RESUMO"
+            fi
+          done
