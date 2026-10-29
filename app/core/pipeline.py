@@ -80,46 +80,10 @@ def _iso(value) -> str:
 
 
 def _netcdf_encoding(ds: xr.Dataset, dtype: str = "float32") -> dict:
-    """Compressed, loss-bounded representation for forecast products.
-
-    NetCDF's ``scale_factor`` writes a small integer but xarray restores the
-    physical value on read.  A probability therefore keeps two decimal places
-    *in percent* (43.27% becomes 4327) instead of spending four bytes on a
-    float, and the deterministic flash field keeps tenths after smoothing.
-    The latter is deliberately not rounded to a whole flash: smoothing turns a
-    count into a continuous spatial field.
-    """
-    encoding = {var: {"zlib": True, "complevel": 4, "dtype": dtype}
-                for var in ds.data_vars}
-
-    for var in ds.data_vars:
-        if var.startswith("prob-flash-"):
-            _pack_uint16(encoding[var], ds[var], 0.0001, var)
-        elif var.startswith("deter-flash-"):
-            _pack_uint16(encoding[var], ds[var], 0.1, var)
-
-    # The grid is precise to 0.001° before smoothing, so float32 is still over
-    # a hundred times finer than the source grid.  Coordinates otherwise stay
-    # float64 in every released product.
-    for coordinate in ("lat", "lon"):
-        if coordinate in ds.coords:
-            encoding[coordinate] = {"dtype": "float32"}
-    return encoding
-
-
-def _pack_uint16(encoding: dict, values: xr.DataArray, scale: float, name: str) -> None:
-    """Use uint16 packing when its physical range contains every value.
-
-    Falling back is preferable to clipping an unusually intense forecast.
-    ``65535`` remains reserved as the NetCDF missing-value marker.
-    """
-    maximum = float(values.max(skipna=True))
-    if np.isfinite(maximum) and maximum <= 65534 * scale:
-        encoding.update(dtype="uint16", scale_factor=scale,
-                        _FillValue=np.uint16(65535))
-    else:
-        log.warning("%s reaches %s, outside uint16 packing at scale %s; keeping float32",
-                    name, maximum, scale)
+    return {
+        var: {"zlib": True, "complevel": 4, "dtype": dtype}
+        for var in ds.data_vars
+    }
 
 
 def _save(ds: xr.Dataset, path: Path, dtype: str = "float32") -> Path:
