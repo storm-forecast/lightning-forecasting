@@ -1,5 +1,5 @@
-# Daily: run the forecast from both models (GFS and ECMWF IFS) and publish the products as a
-# release on lightning-data-prediction, where the map reads them.
+# Daily: run the GFS forecast and publish its products as a release on
+# lightning-data-prediction, where the map reads them.
 #
 # Why here and not on the web service: the pipeline needs TensorFlow plus the ConvLSTM models, which
 # does not fit the 512 MB of a free Render instance -- and a paid one is a second subscription for
@@ -147,31 +147,12 @@ jobs:
           KEEP_RUNS: "1"           # the runner is thrown away; only this run matters
           PRECIP_GLOBAL: "true"    # rain needs no model, so it is not confined to South America
           ENABLE_SCHEDULER: "false"
-          # GFS is the only lightning source. ECMWF runs below for worldwide rain only, so it
-          # never loads the 3 GB lightning-model bundle.
+          # GFS is the only source published by this workflow.
           SOURCES: gfs
           # Where a failed source leaves its reason, for the step that publishes the run's state.
           FALHAS_JSON: ${{ runner.temp }}/falhas.json
         run: |
           python -m worker.run_daily \
-            ${{ inputs.date && format('--date {0}', inputs.date) || '' }} \
-            ${{ inputs.force && '--force' || '' }}
-
-      # ECMWF rain is useful as a second weather source, but its lightning calculation uses the
-      # same heavy models as GFS. Download only `tp` and publish its global rain field. A late
-      # ECMWF bucket must not prevent the GFS lightning forecast from being published.
-      - if: steps.config.outputs.ok == 'true'
-        name: Rodar somente a chuva ECENS
-        continue-on-error: true
-        env:
-          DATA_DIR: ${{ runner.temp }}/data
-          ASSETS_LOCAL_DIR: ${{ runner.temp }}/assets
-          HORIZON_HOURS: "48"
-          PRECIP_GLOBAL: "true"
-          ENABLE_SCHEDULER: "false"
-          FALHAS_JSON: ${{ runner.temp }}/falhas.json
-        run: |
-          python -m worker.run_daily --source ecmwf --rain-only \
             ${{ inputs.date && format('--date {0}', inputs.date) || '' }} \
             ${{ inputs.force && '--force' || '' }}
 
@@ -191,7 +172,7 @@ jobs:
           fi
           echo "rodada: $RUN_DIR"
 
-          # Three assets: GFS lightning and rain, plus ECENS rain.
+          # Two assets: GFS lightning and worldwide rain.
           # Everything else the run produces stays in the run directory -- the per-region files and
           # the unsmoothed merges are intermediate, and every asset here costs bandwidth on each poll.
           #
@@ -207,7 +188,6 @@ jobs:
           ESPERADOS="
             lightning/gfs_prediction_ALL_regions_suavisado.nc
             precipitation/gfs_precipitation_global.nc
-            precipitation/ecens_precipitation_global.nc
           "
 
           ARQUIVOS=""
@@ -234,10 +214,10 @@ jobs:
             || gh release create "$TAG" --repo "$REPO" \
                  --title "Previsão mais recente" \
                  --notes "Sobrescrito a cada rodada. Veja o README para o que há dentro."
-          # No ECENS lightning is published any more. Delete the old asset so `latest` cannot
-          # silently keep serving yesterday's ECENS field.
-          gh release delete-asset "$TAG" ecens_prediction_ALL_regions_suavisado.nc \
-            --repo "$REPO" --yes >/dev/null 2>&1 || true
+          # ECENS is disabled. Delete both old assets so `latest` cannot silently serve stale data.
+          for antigo in ecens_prediction_ALL_regions_suavisado.nc ecens_precipitation_global.nc; do
+            gh release delete-asset "$TAG" "$antigo" --repo "$REPO" --yes >/dev/null 2>&1 || true
+          done
           gh release upload "$TAG" $ARQUIVOS --repo "$REPO" --clobber
 
           # A dated copy as well, so there is a record to measure against later: today's forecast is
@@ -284,8 +264,7 @@ jobs:
             echo "  \"produzidos\": ["
             primeiro=1
             for rel in lightning/gfs_prediction_ALL_regions_suavisado.nc \
-                       precipitation/gfs_precipitation_global.nc \
-                       precipitation/ecens_precipitation_global.nc; do
+                       precipitation/gfs_precipitation_global.nc; do
               existe=false
               [ -n "$RUN_DIR" ] && [ -f "$RUN_DIR/$rel" ] && existe=true
               [ $primeiro -eq 0 ] && echo ","
@@ -328,9 +307,7 @@ jobs:
           echo "Produzido em \`$(basename "$RUN_DIR")\`:" >> "$RESUMO"
           echo >> "$RESUMO"
           for rel in lightning/gfs_prediction_ALL_regions_suavisado.nc \
-                     lightning/ecens_prediction_ALL_regions_suavisado.nc \
-                     precipitation/gfs_precipitation_global.nc \
-                     precipitation/ecens_precipitation_global.nc; do
+                     precipitation/gfs_precipitation_global.nc; do
             if [ -f "$RUN_DIR/$rel" ]; then
               echo "- ✅ \`$rel\` ($(du -h "$RUN_DIR/$rel" | cut -f1))" >> "$RESUMO"
             else
