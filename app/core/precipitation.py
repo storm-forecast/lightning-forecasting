@@ -124,10 +124,24 @@ def save_precipitation(ds: xr.Dataset, output_file: Path) -> Path:
     output_file = Path(output_file)
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
-    encoding = {
-        var: {"zlib": True, "complevel": 4, "dtype": "float32"}
-        for var in ds.data_vars
-    }
+    # Rain is continuous, so an integer without a scale would erase light
+    # precipitation.  One stored unit equals 0.1 mm: enough for the map and
+    # point values, while a uint16 still reaches 6553.4 mm in a window.
+    encoding = {}
+    for var in ds.data_vars:
+        field = ds[var]
+        maximum = float(field.max(skipna=True))
+        if np.isfinite(maximum) and maximum <= 65534 * 0.1:
+            encoding[var] = {"zlib": True, "complevel": 4, "dtype": "uint16",
+                             "scale_factor": 0.1, "_FillValue": np.uint16(65535)}
+        else:
+            # An exceptional accumulation must stay exact enough to be useful;
+            # never silently wrap it in the compact representation.
+            log.warning("%s reaches %s mm, outside uint16 packing; keeping float32", var, maximum)
+            encoding[var] = {"zlib": True, "complevel": 4, "dtype": "float32"}
+    for coordinate in ("lat", "lon"):
+        if coordinate in ds.coords:
+            encoding[coordinate] = {"dtype": "float32"}
 
     tmp = output_file.with_suffix(".tmp.nc")
     ds.to_netcdf(tmp, encoding=encoding)
