@@ -41,6 +41,7 @@ from app.core.pipeline import (
     common_times,
     prepare_inputs,
     run_pipeline,
+    run_precipitation_only,
 )
 
 
@@ -101,6 +102,10 @@ def main() -> int:
         "--no-align", action="store_true",
         help="Let each source run on its own valid times instead of the shared ones",
     )
+    parser.add_argument(
+        "--rain-only", action="store_true",
+        help="Generate only worldwide precipitation; skips lightning models",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -149,13 +154,19 @@ def main() -> int:
     for index, source in enumerate(sources):
         log.info("=== %s ===", source)
         try:
-            manifest = run_pipeline(
-                settings, reference_time=reference, force=args.force, source=source,
-                restrict_times=shared,
-                # Keep the downloads until the last source has used them -- without overriding a
-                # configuration that asked for the work directory to be left alone.
-                cleanup=settings.cleanup_workdir and index == len(sources) - 1,
-            )
+            if args.rain_only:
+                manifest = run_precipitation_only(
+                    settings, reference_time=reference, force=args.force, source=source,
+                    cleanup=settings.cleanup_workdir and index == len(sources) - 1,
+                )
+            else:
+                manifest = run_pipeline(
+                    settings, reference_time=reference, force=args.force, source=source,
+                    restrict_times=shared,
+                    # Keep the downloads until the last source has used them -- without overriding a
+                    # configuration that asked for the work directory to be left alone.
+                    cleanup=settings.cleanup_workdir and index == len(sources) - 1,
+                )
         except Exception as error:                              # noqa: BLE001
             # One source failing is a worse forecast, not a failed run: the other one is still
             # worth publishing, and the manifest records which source is missing.
@@ -169,7 +180,7 @@ def main() -> int:
         return 1
 
     # ---- phase 3: the net under the prediction's own dropping of valid times
-    if not args.no_align:
+    if not args.no_align and not args.rain_only:
         aligned = align_lightning_times(settings, manifest["run_id"])
         if aligned:
             manifest = state.get_manifest(settings.products_dir, manifest["run_id"]) or manifest
